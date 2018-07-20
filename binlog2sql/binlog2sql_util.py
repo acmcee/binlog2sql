@@ -259,3 +259,32 @@ def reversed_blocks(fin, block_size=4096):
         here -= delta
         fin.seek(here, os.SEEK_SET)
         yield fin.read(delta)
+
+
+def new_strip(s):
+    return s.strip()
+
+
+def get_start_end_file_pos(conn, start_datetime, end_datetime):
+    """
+    获取binlog 的位点，假设操作系统的文件系统时间是可靠的
+    :param conn:  连接
+    :param start_datetime: 开始时间
+    :param end_datetime: 结束时间
+    :return:
+    """
+    start_binlog = None
+    stop_binlog = None
+    start_pos = None
+    end_pos = None
+    with conn as cursor:
+        cursor.execute('show variables like "log_bin_index"')
+        log_bin_index_file = cursor.fetchone()[1]
+        with open(log_bin_index_file, 'r') as f:
+            binlog_file_paths = map(new_strip,f.readlines())
+            # binlog_files = map(lambda x: x.split('/')[-1], binlog_file_paths)
+
+        for binlog_file_path in binlog_file_paths:
+            c_time = datetime.datetime.fromtimestamp(os.stat(binlog_file_path).st_mtime)
+            m_time = datetime.datetime.fromtimestamp(os.stat(binlog_file_path).st_mtime)
+            if c_time< start_datetime and m_time > end_datetime
