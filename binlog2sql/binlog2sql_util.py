@@ -12,6 +12,8 @@ from pymysqlreplication.row_event import (
     DeleteRowsEvent,
 )
 from pymysqlreplication.event import QueryEvent
+import struct
+import time
 
 if sys.version > '3':
     PY3PLUS = True
@@ -107,8 +109,8 @@ def command_line_args(args):
     if args.help or need_print_help:
         parser.print_help()
         sys.exit(1)
-    if not args.start_file:
-        raise ValueError('Lack of parameter: start_file')
+    # if not args.start_file:
+    #     raise ValueError('Lack of parameter: start_file')
     if args.flashback and args.stop_never:
         raise ValueError('Only one of flashback or stop-never can be True')
     if args.flashback and args.no_pk:
@@ -265,6 +267,109 @@ def new_strip(s):
     return s.strip()
 
 
+def read_event_header(f):
+    tr = f.read(1)
+    if tr:
+        f.seek(-1, 1)
+        cpos = f.tell()
+        timestamp, event_type, server_id, event_length, next_position, flag = struct.unpack('<IBIIIH', f.read(19))
+        return cpos, timestamp, next_position
+    else:
+        return None, None, None
+
+
+def analyse_binlog(binlog):
+    """
+    https://my.oschina.net/alchemystar/blog/850467
+    https://dev.mysql.com/doc/internals/en/event-meanings.html
+    :param binlog:
+    :return:
+    """
+    f = open(binlog, 'rb', 1024)
+    binlog_header = b'\xfe\x62\x69\x6e'
+    file_header = f.read(4)
+    if file_header != binlog_header:
+        raise Exception('%s is not mysqlbinlog' % binlog)
+    # binlog  event 包
+    # event header timestamp
+    f_pos, f_timestamp, f_next_position = read_event_header(f)
+    if f_pos is None:
+        return None
+    begin_time = f_timestamp
+    f.seek(0, 2)
+    file_size = f.tell()
+
+    f.seek(-47, 2)   # 到最后一个ROTATE_EVENT
+    event_header = read_event_header(f)
+    if event_header:
+        c_pos, c_timestamp, c_next_position = event_header
+        # 读取event header timestamp
+        if c_next_position == file_size and c_next_position - c_pos == 47:
+            end_time = c_timestamp
+        else:
+            f.seek(-23, 2)  # 到最后一个STOP_EVENT
+            event_header = read_event_header(f)
+            c_pos, c_timestamp, c_next_position = event_header
+            if c_next_position == file_size and c_next_position - c_pos == 23:
+                end_time = c_timestamp
+            else:
+                end_time = 0
+        f.close()
+        return {'create_at': begin_time, 'update_at': end_time}
+    else:
+        f.close()
+        return
+
+
+def get_binlog_pos_from_time(binlog, start_datetime, stop_datetime=''):
+    """
+    根据binlog名字 和  时间戳获取相应的binlog 位点，因为binlog2sql 本身根据时间点去执行太慢了
+    :param binlog:
+    :param start_datetime:
+    :param stop_datetime:
+    :return:start_position, stop_position
+    """
+    start_timestamp = int(time.mktime(start_datetime.timetuple())) if start_datetime else 0
+    stop_timestamp = int(time.mktime(stop_datetime.timetuple())) if stop_datetime else 0
+    if start_timestamp == 0 and stop_timestamp == 0:
+        # 如果两个位点都是空值，直接返回None
+        return
+    f = open(binlog, 'rb', 1024)
+    binlog_header = b'\xfe\x62\x69\x6e'
+    file_header = f.read(4)
+    if file_header != binlog_header:
+        raise Exception('%s is not mysqlbinlog' % binlog)
+    start_position = 0
+    stop_position = 0
+    last_position = 0
+    start_position_fin_flag = 1 if start_timestamp == 0 else 0  # 表示开始位点已经检查过了
+    stop_position_fin_flag = 1 if stop_timestamp == 0 else 0  # 表示结束位点一键检查过了
+    while True:
+        event_header = read_event_header(f)
+        if event_header:
+            f_pos, f_timestamp, f_next_position = event_header
+            if start_position_fin_flag == 0:
+                if f_timestamp >= start_timestamp:  # 如果现在的时间戳大于等于需要的时间戳，把上一次的位点设置为起始位点
+                    # agent_logger.info(event_header)
+                    # agent_logger.info('analyse start pos finished')
+                    start_position = last_position
+                    start_position_fin_flag = 1
+            elif stop_position_fin_flag == 0:
+                if f_timestamp > stop_timestamp:  # 如果现在的时间戳大于需要的时间戳，那么就设置这个位点为结束位点
+                    # agent_logger.info(event_header)
+                    # agent_logger.info('analyse finish pos finished')
+                    stop_position = f_pos
+                    break
+            else:
+                break
+            last_position = f_pos
+            f.seek(f_next_position)
+        else:
+            break
+    f.close()
+    return start_position, stop_position
+
+
 def get_start_end_file_pos(conn, start_datetime, end_datetime):
     """
     获取binlog 的位点，假设操作系统的文件系统时间是可靠的
@@ -273,18 +378,50 @@ def get_start_end_file_pos(conn, start_datetime, end_datetime):
     :param end_datetime: 结束时间
     :return:
     """
-    start_binlog = None
-    stop_binlog = None
-    start_pos = None
-    end_pos = None
+    start_file = ''
+    end_file = ''
+    start_pos = 0
+    end_pos = 0
+    start_datetime = datetime.datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
+    if end_datetime:
+        end_datetime = datetime.datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S")
     with conn as cursor:
         cursor.execute('show variables like "log_bin_index"')
         log_bin_index_file = cursor.fetchone()[1]
         with open(log_bin_index_file, 'r') as f:
-            binlog_file_paths = map(new_strip,f.readlines())
+            binlog_file_paths = map(new_strip, f.readlines())
             # binlog_files = map(lambda x: x.split('/')[-1], binlog_file_paths)
 
+        start_pos_flag = False  # 表示开始位点已经找到
+        stop_pos_flag = False  # 表示开始位点已经找到
+        if not end_datetime:
+            stop_pos_flag = True
+
         for binlog_file_path in binlog_file_paths:
-            c_time = datetime.datetime.fromtimestamp(os.stat(binlog_file_path).st_mtime)
-            m_time = datetime.datetime.fromtimestamp(os.stat(binlog_file_path).st_mtime)
-            if c_time< start_datetime and m_time > end_datetime
+            binlog_create_time = datetime.datetime.fromtimestamp(os.stat(binlog_file_path).st_atime)
+            binlog_modify_time = datetime.datetime.fromtimestamp(os.stat(binlog_file_path).st_mtime)
+            # sys.stderr.write('%s %s %s \n' % (binlog_file_path, binlog_create_time, binlog_modify_time))
+            if not start_pos_flag and binlog_create_time <= start_datetime <= binlog_modify_time:
+                if binlog_create_time <= end_datetime <= binlog_modify_time:
+                    start_pos, end_pos = get_binlog_pos_from_time(binlog_file_path, start_datetime, end_datetime)
+                    start_pos_flag = True
+                    stop_pos_flag = True
+                    start_file = end_file = binlog_file_path.split('/')[-1]
+                else:
+                    start_pos, _ = get_binlog_pos_from_time(binlog_file_path, start_datetime)
+                    start_file = binlog_file_path.split('/')[-1]
+
+                    start_pos_flag = True
+            elif not stop_pos_flag and binlog_create_time <= end_datetime <= binlog_modify_time:
+                _, end_pos = get_binlog_pos_from_time(binlog_file_path, start_datetime)
+                stop_pos_flag = True
+                end_file = binlog_file_path.split('/')[-1]
+
+            else:
+                continue
+
+            if start_pos_flag and stop_pos_flag:
+                break
+    binlog_info = {'start_file': start_file, 'end_file': end_file, 'start_pos': start_pos, 'end_pos': end_pos}
+    sys.stderr.write('%s \n' % str(binlog_info))
+    return binlog_info

@@ -7,7 +7,7 @@ import pymysql
 from pymysqlreplication import BinLogStreamReader
 from pymysqlreplication.event import QueryEvent, RotateEvent, FormatDescriptionEvent
 from binlog2sql_util import command_line_args, concat_sql_from_binlog_event, create_unique_file, temp_open, \
-    reversed_lines, is_dml_event, event_type
+    reversed_lines, is_dml_event, event_type, get_start_end_file_pos
 
 
 class Binlog2sql(object):
@@ -19,8 +19,8 @@ class Binlog2sql(object):
         conn_setting: {'host': 127.0.0.1, 'port': 3306, 'user': user, 'passwd': passwd, 'charset': 'utf8'}
         """
 
-        if not start_file:
-            raise ValueError('Lack of parameter: start_file')
+        # if not start_file:
+        #     raise ValueError('Lack of parameter: start_file')
 
         self.conn_setting = connection_settings
         self.start_file = start_file
@@ -44,6 +44,10 @@ class Binlog2sql(object):
 
         self.binlogList = []
         self.connection = pymysql.connect(**self.conn_setting)
+        if start_time:
+            binlog_info = get_start_end_file_pos(self.connection, start_time, stop_time)
+            for k, v in binlog_info.items():
+                setattr(self, k, v)
         with self.connection as cursor:
             cursor.execute("SHOW MASTER STATUS")
             self.eof_file, self.eof_pos = cursor.fetchone()[:2]
