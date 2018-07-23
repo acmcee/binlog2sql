@@ -47,7 +47,9 @@ class Binlog2sql(object):
         if start_time:
             binlog_info = get_start_end_file_pos(self.connection, start_time, stop_time)
             for k, v in binlog_info.items():
-                setattr(self, k, v)
+                if v:
+                    setattr(self, k, v)
+
         with self.connection as cursor:
             cursor.execute("SHOW MASTER STATUS")
             self.eof_file, self.eof_pos = cursor.fetchone()[:2]

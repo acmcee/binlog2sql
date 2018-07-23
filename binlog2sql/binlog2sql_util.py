@@ -378,10 +378,9 @@ def get_start_end_file_pos(conn, start_datetime, end_datetime):
     :param end_datetime: 结束时间
     :return:
     """
-    start_file = ''
-    end_file = ''
-    start_pos = 0
-    end_pos = 0
+    binlog_info = {'start_file': '', 'end_file': '', 'start_pos': 4, 'end_pos': 0}
+    if conn.host not in ['127.0.0.1', 'localhost']:
+        return binlog_info
     start_datetime = datetime.datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
     if end_datetime:
         end_datetime = datetime.datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S")
@@ -403,25 +402,25 @@ def get_start_end_file_pos(conn, start_datetime, end_datetime):
             # sys.stderr.write('%s %s %s \n' % (binlog_file_path, binlog_create_time, binlog_modify_time))
             if not start_pos_flag and binlog_create_time <= start_datetime <= binlog_modify_time:
                 if binlog_create_time <= end_datetime <= binlog_modify_time:
-                    start_pos, end_pos = get_binlog_pos_from_time(binlog_file_path, start_datetime, end_datetime)
+                    binlog_info['start_pos'], binlog_info['end_pos'] \
+                        = get_binlog_pos_from_time(binlog_file_path, start_datetime, end_datetime)
                     start_pos_flag = True
                     stop_pos_flag = True
-                    start_file = end_file = binlog_file_path.split('/')[-1]
+                    binlog_info['start_file'] = binlog_info['end_file'] = binlog_file_path.split('/')[-1]
                 else:
-                    start_pos, _ = get_binlog_pos_from_time(binlog_file_path, start_datetime)
-                    start_file = binlog_file_path.split('/')[-1]
+                    binlog_info['start_pos'], _ = get_binlog_pos_from_time(binlog_file_path, start_datetime)
+                    binlog_info['start_file'] = binlog_file_path.split('/')[-1]
 
                     start_pos_flag = True
             elif not stop_pos_flag and binlog_create_time <= end_datetime <= binlog_modify_time:
-                _, end_pos = get_binlog_pos_from_time(binlog_file_path, start_datetime)
+                _, binlog_info['end_pos'] = get_binlog_pos_from_time(binlog_file_path, start_datetime)
                 stop_pos_flag = True
-                end_file = binlog_file_path.split('/')[-1]
+                binlog_info['end_file'] = binlog_file_path.split('/')[-1]
 
             else:
                 continue
 
             if start_pos_flag and stop_pos_flag:
                 break
-    binlog_info = {'start_file': start_file, 'end_file': end_file, 'start_pos': start_pos, 'end_pos': end_pos}
-    sys.stderr.write('%s \n' % str(binlog_info))
+    sys.stderr.write('datetime trans to pos info %s \n' % str(binlog_info))
     return binlog_info
